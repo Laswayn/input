@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 
 export async function POST() {
-  cookies().delete("auth-token")
+  const response = NextResponse.json({
+    success: true,
+    message: "Logout berhasil",
+  })
 
-  return NextResponse.json({ success: true })
+  response.cookies.delete("auth-token")
+  return response
 }

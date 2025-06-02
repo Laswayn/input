@@ -1,17 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { jwtVerify } from "jose"
-import { cookies } from "next/headers"
-import { neon } from "@neondatabase/serverless"
+import jwt from "jsonwebtoken"
+import pool from "@/lib/database"
 
-const sql = neon(process.env.DATABASE_URL!)
+function verifyAuth(request: NextRequest) {
+  const token = request.cookies.get("auth-token")?.value
+  if (!token) return false
 
-async function verifyAuth() {
   try {
-    const token = cookies().get("auth-token")?.value
-    if (!token) return false
-
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET || "your-secret-key")
-    await jwtVerify(token, secret)
+    jwt.verify(token, process.env.JWT_SECRET!)
     return true
   } catch {
     return false
@@ -19,48 +15,47 @@ async function verifyAuth() {
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await verifyAuth())) {
+  if (!verifyAuth(request)) {
     return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const data = await request.json()
-    const { family_id, ...memberData } = data
+    const {
+      family_id,
+      nama,
+      umur,
+      hubungan,
+      jenis_kelamin,
+      status_perkawinan,
+      pendidikan,
+      kegiatan,
+      memiliki_pekerjaan,
+      status_pekerjaan_diinginkan,
+      bidang_usaha,
+    } = await request.json()
 
-    // Find family
-    const family = await sql`
-      SELECT * FROM families WHERE keluarga_id = ${family_id}
-    `
-
-    if (family.length === 0) {
-      return NextResponse.json({ success: false, message: "Family not found" }, { status: 404 })
+    // Validation
+    if (
+      !family_id ||
+      !nama ||
+      !umur ||
+      !hubungan ||
+      !jenis_kelamin ||
+      !status_perkawinan ||
+      !pendidikan ||
+      !kegiatan ||
+      !memiliki_pekerjaan
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Semua field harus diisi",
+        },
+        { status: 400 },
+      )
     }
 
-    // Validate required fields
-    const requiredFields = [
-      "nama",
-      "umur",
-      "hubungan",
-      "jenis_kelamin",
-      "status_perkawinan",
-      "pendidikan",
-      "kegiatan",
-      "memiliki_pekerjaan",
-    ]
-    for (const field of requiredFields) {
-      if (!memberData[field] && memberData[field] !== 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Field ${field} wajib diisi`,
-          },
-          { status: 400 },
-        )
-      }
-    }
-
-    // Additional validation
-    if (memberData.umur < 15) {
+    if (umur < 15) {
       return NextResponse.json(
         {
           success: false,
@@ -70,51 +65,88 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get current member count
-    const memberCount = await sql`
-      SELECT COUNT(*) as count FROM members WHERE keluarga_id = ${family_id}
-    `
+    // Get family info
+    const familyResult = await pool.query("SELECT * FROM families WHERE keluarga_id = $1", [family_id])
 
-    const nextMemberNumber = Number.parseInt(memberCount[0].count) + 1
-
-    // Add member to database
-    await sql`
-      INSERT INTO members (
-        family_id, keluarga_id, anggota_ke, nama, umur, hubungan, 
-        jenis_kelamin, status_perkawinan, pendidikan, kegiatan, 
-        memiliki_pekerjaan, status_pekerjaan_diinginkan, bidang_usaha
-      ) VALUES (
-        ${family[0].id}, ${family_id}, ${nextMemberNumber}, ${memberData.nama}, 
-        ${memberData.umur}, ${memberData.hubungan}, ${memberData.jenis_kelamin}, 
-        ${memberData.status_perkawinan}, ${memberData.pendidikan}, ${memberData.kegiatan}, 
-        ${memberData.memiliki_pekerjaan}, ${memberData.status_pekerjaan_diinginkan || null}, 
-        ${memberData.bidang_usaha || null}
+    if (familyResult.rows.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Family not found",
+        },
+        { status: 404 },
       )
-    `
+    }
 
-    const remainingMembers = family[0].jumlah_anggota_15plus - nextMemberNumber
+    const family = familyResult.rows[0]
 
-    if (remainingMembers > 0) {
+    // Get current member count
+    const memberCountResult = await pool.query("SELECT COUNT(*) as count FROM family_members WHERE keluarga_id = $1", [
+      family_id,
+    ])
+
+    const currentMemberCount = Number.parseInt(memberCountResult.rows[0].count)
+    const anggota_ke = currentMemberCount + 1
+
+    // Check if we've reached the limit
+    if (currentMemberCount >= family.jumlah_anggota_15plus) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Sudah mencapai batas maksimal anggota keluarga",
+        },
+        { status: 400 },
+      )
+    }
+
+    // Insert member data
+    const memberResult = await pool.query(
+      `INSERT INTO family_members 
+       (family_id, keluarga_id, anggota_ke, nama, umur, hubungan, jenis_kelamin, 
+        status_perkawinan, pendidikan, kegiatan, memiliki_pekerjaan, 
+        status_pekerjaan_diinginkan, bidang_usaha)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       RETURNING *`,
+      [
+        family.id,
+        family_id,
+        anggota_ke,
+        nama,
+        umur,
+        hubungan,
+        jenis_kelamin,
+        status_perkawinan,
+        pendidikan,
+        kegiatan,
+        memiliki_pekerjaan,
+        status_pekerjaan_diinginkan || null,
+        bidang_usaha || null,
+      ],
+    )
+
+    const newMemberCount = currentMemberCount + 1
+    const remaining = family.jumlah_anggota_15plus - newMemberCount
+
+    if (remaining > 0) {
       return NextResponse.json({
         success: true,
         message: "Data anggota berhasil disimpan. Lanjutkan ke anggota berikutnya.",
         continue_next_member: true,
-        remaining: remainingMembers,
+        remaining,
       })
     } else {
       return NextResponse.json({
         success: true,
-        message: "Semua data anggota berhasil disimpan.",
-        redirect: true,
+        message: "Semua data anggota berhasil disimpan. Lanjutkan ke halaman akhir.",
         redirect_url: `/final?family_id=${family_id}`,
       })
     }
   } catch (error) {
-    console.error("Error saving member data:", error)
+    console.error("Error saving member:", error)
     return NextResponse.json(
       {
         success: false,
-        message: "Terjadi kesalahan server",
+        message: "Terjadi kesalahan saat menyimpan data",
       },
       { status: 500 },
     )

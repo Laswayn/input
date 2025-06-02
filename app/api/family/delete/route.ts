@@ -1,17 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { jwtVerify } from "jose"
-import { cookies } from "next/headers"
-import { neon } from "@neondatabase/serverless"
+import jwt from "jsonwebtoken"
+import pool from "@/lib/database"
 
-const sql = neon(process.env.DATABASE_URL!)
+function verifyAuth(request: NextRequest) {
+  const token = request.cookies.get("auth-token")?.value
+  if (!token) return false
 
-async function verifyAuth() {
   try {
-    const token = cookies().get("auth-token")?.value
-    if (!token) return false
-
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET || "your-secret-key")
-    await jwtVerify(token, secret)
+    jwt.verify(token, process.env.JWT_SECRET!)
     return true
   } catch {
     return false
@@ -19,7 +15,7 @@ async function verifyAuth() {
 }
 
 export async function DELETE(request: NextRequest) {
-  if (!(await verifyAuth())) {
+  if (!verifyAuth(request)) {
     return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 })
   }
 
@@ -27,22 +23,27 @@ export async function DELETE(request: NextRequest) {
     const { family_id } = await request.json()
 
     if (!family_id) {
-      return NextResponse.json({ success: false, message: "Family ID required" }, { status: 400 })
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Family ID is required",
+        },
+        { status: 400 },
+      )
     }
 
-    // Check if family exists
-    const family = await sql`
-      SELECT id FROM families WHERE keluarga_id = ${family_id}
-    `
+    // Delete family (cascade will delete members and jobs)
+    const result = await pool.query("DELETE FROM families WHERE keluarga_id = $1 RETURNING *", [family_id])
 
-    if (family.length === 0) {
-      return NextResponse.json({ success: false, message: "Family not found" }, { status: 404 })
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Family not found",
+        },
+        { status: 404 },
+      )
     }
-
-    // Delete related data (cascade should handle this, but let's be explicit)
-    await sql`DELETE FROM surveys WHERE keluarga_id = ${family_id}`
-    await sql`DELETE FROM members WHERE keluarga_id = ${family_id}`
-    await sql`DELETE FROM families WHERE keluarga_id = ${family_id}`
 
     return NextResponse.json({
       success: true,
@@ -53,7 +54,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json(
       {
         success: false,
-        message: "Terjadi kesalahan server",
+        message: "Terjadi kesalahan saat menghapus data",
       },
       { status: 500 },
     )

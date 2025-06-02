@@ -1,19 +1,16 @@
-import { NextResponse } from "next/server"
-import { jwtVerify } from "jose"
-import { cookies } from "next/headers"
+import { type NextRequest, NextResponse } from "next/server"
+import jwt from "jsonwebtoken"
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const token = cookies().get("auth-token")?.value
+    const token = request.cookies.get("auth-token")?.value
 
     if (!token) {
       return NextResponse.json({ authenticated: false })
     }
 
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET || "your-secret-key")
-    await jwtVerify(token, secret)
-
-    return NextResponse.json({ authenticated: true })
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!)
+    return NextResponse.json({ authenticated: true, user: decoded })
   } catch (error) {
     return NextResponse.json({ authenticated: false })
   }

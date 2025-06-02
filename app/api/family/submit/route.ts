@@ -1,17 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { jwtVerify } from "jose"
-import { cookies } from "next/headers"
-import { neon } from "@neondatabase/serverless"
+import jwt from "jsonwebtoken"
+import pool from "@/lib/database"
 
-const sql = neon(process.env.DATABASE_URL!)
+function verifyAuth(request: NextRequest) {
+  const token = request.cookies.get("auth-token")?.value
+  if (!token) return false
 
-async function verifyAuth() {
   try {
-    const token = cookies().get("auth-token")?.value
-    if (!token) return false
-
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET || "your-secret-key")
-    await jwtVerify(token, secret)
+    jwt.verify(token, process.env.JWT_SECRET!)
     return true
   } catch {
     return false
@@ -19,29 +15,25 @@ async function verifyAuth() {
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await verifyAuth())) {
+  if (!verifyAuth(request)) {
     return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const data = await request.json()
+    const { rt, rw, dusun, nama_kepala, alamat, jumlah_anggota, jumlah_anggota_15plus } = await request.json()
 
-    // Validate required fields
-    const requiredFields = ["rt", "rw", "dusun", "nama_kepala", "alamat", "jumlah_anggota", "jumlah_anggota_15plus"]
-    for (const field of requiredFields) {
-      if (!data[field] && data[field] !== 0) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Field ${field} wajib diisi`,
-          },
-          { status: 400 },
-        )
-      }
+    // Validation
+    if (!rt || !rw || !dusun || !nama_kepala || !alamat || !jumlah_anggota || jumlah_anggota_15plus === undefined) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Semua field harus diisi",
+        },
+        { status: 400 },
+      )
     }
 
-    // Additional validation
-    if (data.jumlah_anggota < 1) {
+    if (jumlah_anggota < 1) {
       return NextResponse.json(
         {
           success: false,
@@ -51,21 +43,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (data.jumlah_anggota_15plus < 0) {
+    if (jumlah_anggota_15plus < 0 || jumlah_anggota_15plus > jumlah_anggota) {
       return NextResponse.json(
         {
           success: false,
-          message: "Jumlah anggota usia 15+ tidak boleh negatif",
-        },
-        { status: 400 },
-      )
-    }
-
-    if (data.jumlah_anggota_15plus > data.jumlah_anggota) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "Jumlah anggota usia 15+ tidak boleh lebih dari jumlah anggota keluarga",
+          message: "Jumlah anggota usia 15+ tidak valid",
         },
         { status: 400 },
       )
@@ -73,68 +55,72 @@ export async function POST(request: NextRequest) {
 
     // Generate family ID
     const timestamp = new Date()
-    const familyId = `KEL-${data.rt}${data.rw}-${timestamp.getTime()}`
+      .toISOString()
+      .replace(/[-:T.]/g, "")
+      .slice(0, 14)
+    const keluarga_id = `KEL-${rt}${rw}-${timestamp}`
 
-    // Save family data to database
-    await sql`
-      INSERT INTO families (
-        keluarga_id, rt, rw, dusun, nama_kepala, alamat, 
-        jumlah_anggota, jumlah_anggota_15plus
-      ) VALUES (
-        ${familyId}, ${data.rt}, ${data.rw}, ${data.dusun}, 
-        ${data.nama_kepala}, ${data.alamat}, ${data.jumlah_anggota}, 
-        ${data.jumlah_anggota_15plus}
-      )
-    `
+    // Insert family data
+    const result = await pool.query(
+      `INSERT INTO families (keluarga_id, rt, rw, dusun, nama_kepala, alamat, jumlah_anggota, jumlah_anggota_15plus)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [keluarga_id, rt, rw, dusun, nama_kepala, alamat, jumlah_anggota, jumlah_anggota_15plus],
+    )
 
-    // Determine next step
-    if (data.jumlah_anggota_15plus > 0) {
+    if (jumlah_anggota_15plus > 0) {
       return NextResponse.json({
         success: true,
         message: "Data keluarga berhasil disimpan. Lanjutkan ke input anggota keluarga.",
-        redirect: true,
-        redirect_url: `/members?family_id=${familyId}`,
+        redirect_url: `/members?family_id=${keluarga_id}`,
       })
     } else {
       return NextResponse.json({
         success: true,
-        message: "Data keluarga berhasil disimpan.",
-        redirect: true,
-        redirect_url: `/final?family_id=${familyId}`,
+        message: "Data keluarga berhasil disimpan. Lanjutkan ke halaman akhir.",
+        redirect_url: `/final?family_id=${keluarga_id}`,
       })
     }
   } catch (error) {
-    console.error("Error saving family data:", error)
+    console.error("Error saving family:", error)
     return NextResponse.json(
       {
         success: false,
-        message: "Terjadi kesalahan server",
+        message: "Terjadi kesalahan saat menyimpan data",
       },
       { status: 500 },
     )
   }
 }
 
-export async function GET() {
-  if (!(await verifyAuth())) {
+export async function GET(request: NextRequest) {
+  if (!verifyAuth(request)) {
     return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const families = await sql`
+    const result = await pool.query(`
       SELECT f.*, 
-             COUNT(m.id) as total_members,
-             CASE WHEN s.id IS NOT NULL THEN true ELSE false END as completed
+             COUNT(fm.id) as total_members,
+             CASE WHEN COUNT(fm.id) >= f.jumlah_anggota_15plus THEN true ELSE false END as completed
       FROM families f
-      LEFT JOIN members m ON f.keluarga_id = m.keluarga_id
-      LEFT JOIN surveys s ON f.keluarga_id = s.keluarga_id
-      GROUP BY f.id, s.id
+      LEFT JOIN family_members fm ON f.id = fm.family_id
+      GROUP BY f.id
       ORDER BY f.created_at DESC
-    `
+    `)
 
-    return NextResponse.json({ data: families })
+    return NextResponse.json({
+      success: true,
+      data: result.rows,
+    })
   } catch (error) {
     console.error("Error fetching families:", error)
-    return NextResponse.json({ success: false, message: "Database error" }, { status: 500 })
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Terjadi kesalahan saat mengambil data",
+      },
+      { status: 500 },
+    )
   }
 }

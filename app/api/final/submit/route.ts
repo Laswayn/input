@@ -1,17 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { jwtVerify } from "jose"
-import { cookies } from "next/headers"
-import { neon } from "@neondatabase/serverless"
+import jwt from "jsonwebtoken"
+import pool from "@/lib/database"
 
-const sql = neon(process.env.DATABASE_URL!)
+function verifyAuth(request: NextRequest) {
+  const token = request.cookies.get("auth-token")?.value
+  if (!token) return false
 
-async function verifyAuth() {
   try {
-    const token = cookies().get("auth-token")?.value
-    if (!token) return false
-
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET || "your-secret-key")
-    await jwtVerify(token, secret)
+    jwt.verify(token, process.env.JWT_SECRET!)
     return true
   } catch {
     return false
@@ -19,59 +15,55 @@ async function verifyAuth() {
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await verifyAuth())) {
+  if (!verifyAuth(request)) {
     return NextResponse.json({ success: false, message: "Unauthorized" }, { status: 401 })
   }
 
   try {
-    const data = await request.json()
-    const { family_id, ...finalData } = data
+    const { family_id, nama_pencacah, hp_pencacah, nama_pemberi_jawaban, hp_pemberi_jawaban, catatan } =
+      await request.json()
 
-    // Find family
-    const family = await sql`
-      SELECT * FROM families WHERE keluarga_id = ${family_id}
-    `
-
-    if (family.length === 0) {
-      return NextResponse.json({ success: false, message: "Family not found" }, { status: 404 })
-    }
-
-    // Validate required fields
-    const requiredFields = ["nama_pencacah", "hp_pencacah", "nama_pemberi_jawaban", "hp_pemberi_jawaban"]
-    for (const field of requiredFields) {
-      if (!finalData[field] || !finalData[field].trim()) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: `Field ${field} wajib diisi`,
-          },
-          { status: 400 },
-        )
-      }
-    }
-
-    // Save survey completion data
-    await sql`
-      INSERT INTO surveys (
-        family_id, keluarga_id, nama_pencacah, hp_pencacah, 
-        nama_pemberi_jawaban, hp_pemberi_jawaban, catatan
-      ) VALUES (
-        ${family[0].id}, ${family_id}, ${finalData.nama_pencacah}, 
-        ${finalData.hp_pencacah}, ${finalData.nama_pemberi_jawaban}, 
-        ${finalData.hp_pemberi_jawaban}, ${finalData.catatan || null}
+    // Validation
+    if (!family_id || !nama_pencacah || !hp_pencacah || !nama_pemberi_jawaban || !hp_pemberi_jawaban) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Semua field harus diisi",
+        },
+        { status: 400 },
       )
-    `
+    }
+
+    // Update family with final information
+    const result = await pool.query(
+      `UPDATE families 
+       SET nama_pencacah = $1, hp_pencacah = $2, nama_pemberi_jawaban = $3, 
+           hp_pemberi_jawaban = $4, catatan = $5, updated_at = CURRENT_TIMESTAMP
+       WHERE keluarga_id = $6
+       RETURNING *`,
+      [nama_pencacah, hp_pencacah, nama_pemberi_jawaban, hp_pemberi_jawaban, catatan || null, family_id],
+    )
+
+    if (result.rows.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Family not found",
+        },
+        { status: 404 },
+      )
+    }
 
     return NextResponse.json({
       success: true,
-      message: "Semua data berhasil disimpan!",
+      message: "Semua data berhasil disimpan. Terima kasih!",
     })
   } catch (error) {
     console.error("Error saving final data:", error)
     return NextResponse.json(
       {
         success: false,
-        message: "Terjadi kesalahan server",
+        message: "Terjadi kesalahan saat menyimpan data",
       },
       { status: 500 },
     )

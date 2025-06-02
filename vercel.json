@@ -1,14 +1,11 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "package.json",
-      "use": "@vercel/next"
-    }
-  ],
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm install",
   "env": {
     "DATABASE_URL": "postgres://neondb_owner:npg_0QgsA1pKXMrY@ep-super-lake-a1c4g1bu-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require",
     "JWT_SECRET": "465a7387588b5d9ffb2d46928ad3ebfb810cc54251090455233a606359b8e0ba"
   }
 }
-
